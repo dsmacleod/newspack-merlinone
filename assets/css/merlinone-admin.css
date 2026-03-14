@@ -1,0 +1,51 @@
+.merlinone-panel .components-text-control__input {
+	width: 100%;
+}
+
+.merlinone-results {
+	margin-top: 12px;
+}
+
+.merlinone-result {
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	padding: 8px;
+	margin-bottom: 8px;
+	background: #fff;
+}
+
+.merlinone-thumb {
+	width: 100%;
+	height: auto;
+	border-radius: 2px;
+	margin-bottom: 4px;
+}
+
+.merlinone-title {
+	font-size: 12px;
+	margin: 4px 0;
+	word-break: break-word;
+}
+
+.merlinone-actions {
+	display: flex;
+	gap: 4px;
+}
+
+.merlinone-actions .components-button {
+	font-size: 12px;
+}
+
+.merlinone-error {
+	color: #d63638;
+	font-size: 13px;
+}
+
+.merlinone-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	margin-top: 12px;
+	font-size: 12px;
+}
