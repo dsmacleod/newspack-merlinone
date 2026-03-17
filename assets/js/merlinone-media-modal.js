@@ -24,6 +24,10 @@
 		const [ editCaption, setEditCaption ] = useState( '' );
 		const [ editCredit, setEditCredit ] = useState( '' );
 		const [ editAsFeatured, setEditAsFeatured ] = useState( false );
+		// Detail/preview panel state.
+		const [ previewAsset, setPreviewAsset ] = useState( null );
+		const [ previewUrl, setPreviewUrl ] = useState( '' );
+		const [ previewLoading, setPreviewLoading ] = useState( false );
 
 		const { getSelectedBlockClientId, getBlockIndex, getBlockRootClientId } = wp.data.select( 'core/block-editor' );
 		const { insertBlock } = useDispatch( 'core/block-editor' );
@@ -40,7 +44,7 @@
 			}
 		}, [ currentSelected ] );
 
-		const pageSize = 20;
+		const pageSize = 10;
 
 		const doSearch = useCallback( function( fromOffset ) {
 			if ( ! query.trim() ) return;
@@ -86,48 +90,72 @@
 			} );
 		};
 
-		// Seed inline thumbs from search results, then batch-fetch any that are still missing.
+		// Load thumbnails individually in the background. Results show immediately
+		// with metadata; thumbnails fill in as each one resolves.
 		useEffect( function() {
 			var cancelled = false;
-
-			// Collect inline thumbnail URLs returned by the search/lookup response.
-			var seeded = {};
-			results.forEach( function( a ) {
-				var id = a.CIMAGEID || a.cimageid || a.id;
-				if ( id && a.thumbnail_url ) {
-					seeded[ id ] = a.thumbnail_url;
-				}
-			} );
-
-			// Determine which IDs still need fetching (not inline, not previously cached).
 			var ids = results.map( function( a ) { return a.CIMAGEID || a.cimageid || a.id; } ).filter( Boolean );
-			var missing = ids.filter( function( id ) { return ! seeded[ id ]; } );
+			var queue = ids.filter( function( id ) { return ! thumbs[ id ]; } );
+			var active = 0;
+			var LIMIT = 3;
 
-			// Apply inline thumbs immediately.
-			if ( Object.keys( seeded ).length > 0 ) {
-				setThumbs( function( prev ) { return Object.assign( {}, prev, seeded ); } );
+			function next() {
+				if ( cancelled || queue.length === 0 ) return;
+				while ( active < LIMIT && queue.length > 0 ) {
+					( function( id ) {
+						active++;
+						apiFetch( {
+							path: NAMESPACE + '/thumbnail',
+							method: 'POST',
+							data: { cimageid: String( id ) },
+						} ).then( function( res ) {
+							active--;
+							if ( cancelled ) return;
+							if ( res.url ) {
+								setThumbs( function( prev ) {
+									var n = Object.assign( {}, prev );
+									n[ id ] = res.url;
+									return n;
+								} );
+							}
+							next();
+						} ).catch( function() { active--; next(); } );
+					} )( queue.shift() );
+				}
 			}
-
-			// Batch-fetch the rest from the server.
-			if ( missing.length > 0 ) {
-				apiFetch( {
-					path: NAMESPACE + '/thumbnails',
-					method: 'POST',
-					data: { ids: missing.join( ',' ) },
-				} ).then( function( res ) {
-					if ( cancelled ) return;
-					if ( res.thumbnails ) {
-						setThumbs( function( prev ) { return Object.assign( {}, prev, res.thumbnails ); } );
-					}
-				} ).catch( function() {} );
-			}
+			next();
 
 			return function() { cancelled = true; };
 		}, [ results ] );
 
+		var doPreview = function( asset ) {
+			var id = asset.CIMAGEID || asset.cimageid || asset.id;
+			setPreviewAsset( asset );
+			setPreviewUrl( '' );
+			setPreviewLoading( true );
+			// Only fetch the larger preview image — metadata is already in the asset.
+			apiFetch( {
+				path: NAMESPACE + '/preview',
+				method: 'POST',
+				data: { cimageid: String( id ) },
+			} ).then( function( res ) {
+				setPreviewLoading( false );
+				setPreviewUrl( res.preview_url || '' );
+			} ).catch( function() {
+				setPreviewLoading( false );
+			} );
+		};
+
+		var closePreview = function() {
+			setPreviewAsset( null );
+			setPreviewUrl( '' );
+		};
+
 		var doImport = function( cimageid, asFeatured ) {
 			setImporting( cimageid );
 			setEditAsFeatured( asFeatured );
+			setPreviewAsset( null );
+			setPreviewUrl( '' );
 			apiFetch( {
 				path: NAMESPACE + '/import',
 				method: 'POST',
@@ -266,36 +294,102 @@
 				)
 			),
 
-			// Results list — hidden when editing.
-			! editData && el( 'div', { className: 'merlinone-results' },
+			// Detail/preview panel — metadata shows instantly, image loads in background.
+			previewAsset && ! editData && ( function() {
+				var pId = String( previewAsset.CIMAGEID || previewAsset.cimageid || previewAsset.id );
+				var pTitle = ( previewAsset.COBJECT205 || previewAsset.cobject205 || '' ).trim();
+				var pCaption = ( previewAsset.CAPT2120 || previewAsset.capt2120 || '' ).trim();
+				var pCredit = ( previewAsset.CREDIT2110 || previewAsset.credit2110 || '' ).trim();
+				var pByline = ( previewAsset.CBYLINE280 || previewAsset.cbyline280 || '' ).trim();
+				var pDate = previewAsset.DATECR255 || previewAsset.datecr255 || '';
+				if ( pDate ) { pDate = pDate.substring( 0, 10 ); }
+				var pKeywords = ( previewAsset.CKEYWORDS || previewAsset.ckeywords || '' ).trim();
+
+				return el( 'div', { className: 'merlinone-preview-panel', style: { marginTop: '12px' } },
+					el( Button, { variant: 'tertiary', onClick: closePreview, style: { marginBottom: '8px' } }, '\u2190 Back to results' ),
+					el( 'div', { style: { width: '100%', minHeight: '120px', background: '#eee', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+						previewUrl
+							? el( 'img', { src: previewUrl, style: { width: '100%', height: 'auto' } } )
+							: ( previewLoading ? el( Spinner ) : null )
+					),
+					el( 'table', { style: { width: '100%', fontSize: '12px', marginBottom: '12px', borderCollapse: 'collapse' } },
+						el( 'tbody', null,
+							el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Merlin ID' ),
+								el( 'td', { style: { padding: '3px 0' } }, pId )
+							),
+							pTitle && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Title' ),
+								el( 'td', { style: { padding: '3px 0' } }, pTitle )
+							),
+							pCaption && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Caption' ),
+								el( 'td', { style: { padding: '3px 0' } }, pCaption )
+							),
+							pCredit && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Credit' ),
+								el( 'td', { style: { padding: '3px 0' } }, pCredit )
+							),
+							pByline && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Byline' ),
+								el( 'td', { style: { padding: '3px 0' } }, pByline )
+							),
+							pDate && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Date' ),
+								el( 'td', { style: { padding: '3px 0' } }, pDate )
+							),
+							pKeywords && el( 'tr', null,
+								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Keywords' ),
+								el( 'td', { style: { padding: '3px 0' } }, pKeywords )
+							)
+						)
+					),
+					el( 'div', { style: { display: 'flex', gap: '8px' } },
+						el( Button, {
+							variant: 'primary',
+							isBusy: importing === pId,
+							disabled: !!importing,
+							onClick: function() { doImport( pId, false ); },
+						}, 'Insert Image' ),
+						el( Button, {
+							variant: 'secondary',
+							isBusy: importing === pId,
+							disabled: !!importing,
+							onClick: function() { doImport( pId, true ); },
+						}, 'Featured' )
+					)
+				);
+			} )(),
+
+			// Results list — hidden when previewing or editing.
+			! editData && ! previewAsset && el( 'div', { className: 'merlinone-results' },
 				results.map( function( asset ) {
 					var id = asset.CIMAGEID || asset.cimageid || asset.id;
-					var title = asset.cobject205 || asset.COBJECT205 || asset.title || id;
-					var thumb = thumbs[ id ] || asset.thumbnail_url || '';
+					var title = ( asset.cobject205 || asset.COBJECT205 || asset.title || '' ).trim();
+					var credit = asset.CREDIT2110 || asset.credit2110 || '';
+					var date = asset.DATECR255 || asset.datecr255 || '';
+					if ( date ) { date = date.substring( 0, 10 ); }
+					var thumb = thumbs[ id ] || '';
 					var isImporting = importing === id;
 
-					return el( 'div', { key: id, className: 'merlinone-result' },
-						thumb && el( 'img', { src: thumb, alt: title, className: 'merlinone-thumb' } ),
-						el( 'p', { className: 'merlinone-title' }, title ),
-						el( 'div', { className: 'merlinone-actions' },
-							el( Button, {
-								variant: 'secondary',
-								isBusy: isImporting,
-								disabled: !!importing,
-								onClick: function() { doImport( String( id ), false ); },
-							}, 'Insert Image' ),
-							el( Button, {
-								variant: 'tertiary',
-								isBusy: isImporting,
-								disabled: !!importing,
-								onClick: function() { doImport( String( id ), true ); },
-							}, 'Featured' )
+					return el( 'div', { key: id, className: 'merlinone-result', onClick: function() { doPreview( asset ); }, style: { cursor: 'pointer' } },
+						el( 'div', { style: { display: 'flex', gap: '8px' } },
+							el( 'div', { style: { width: '80px', minWidth: '80px', height: '60px', background: '#eee', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' } },
+								thumb
+									? el( 'img', { src: thumb, alt: title, style: { width: '100%', height: '100%', objectFit: 'cover' } } )
+									: el( Spinner )
+							),
+							el( 'div', { style: { flex: 1, minWidth: 0 } },
+								el( 'p', { style: { margin: '0 0 2px', fontWeight: '600', fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, title || 'ID: ' + id ),
+								credit && el( 'p', { style: { margin: 0, fontSize: '11px', color: '#666' } }, credit ),
+								date && el( 'p', { style: { margin: 0, fontSize: '11px', color: '#999' } }, date )
+							)
 						)
 					);
 				} )
 			),
 
-			! editData && total > pageSize && el( 'div', { className: 'merlinone-pagination' },
+			! editData && ! previewAsset && total > pageSize && el( 'div', { className: 'merlinone-pagination' },
 				page > 0 && el( Button, { variant: 'tertiary', onClick: function() { doSearch( ( page - 1 ) * pageSize ); } }, '← Prev' ),
 				el( 'span', null, 'Page ' + ( page + 1 ) + ' of ' + Math.ceil( total / pageSize ) ),
 				( page + 1 ) * pageSize < total && el( Button, { variant: 'tertiary', onClick: function() { doSearch( ( page + 1 ) * pageSize ); } }, 'Next →' )

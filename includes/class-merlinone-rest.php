@@ -68,6 +68,19 @@ class Merlinone_REST {
 			),
 		) );
 
+		register_rest_route( $namespace, '/preview', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'preview' ),
+			'permission_callback' => array( $this, 'check_permission' ),
+			'args'                => array(
+				'cimageid' => array(
+					'required'          => true,
+					'type'              => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+			),
+		) );
+
 		register_rest_route( $namespace, '/thumbnails', array(
 			'methods'             => 'POST',
 			'callback'            => array( $this, 'thumbnails_batch' ),
@@ -142,19 +155,9 @@ class Merlinone_REST {
 
 		$assets = isset( $result['assets'] ) ? $result['assets'] : array();
 
-		// Normalize inline thumbnail URLs from search results so the JS can use them directly.
+		// Strip inline thumbnail fields — they are Windows file paths, not URLs.
 		foreach ( $assets as &$asset ) {
-			if ( empty( $asset['thumbnail_url'] ) ) {
-				$thumb = '';
-				if ( ! empty( $asset['thumbweb'] ) ) {
-					$thumb = $asset['thumbweb'];
-				} elseif ( ! empty( $asset['thumb512'] ) ) {
-					$thumb = $asset['thumb512'];
-				}
-				if ( $thumb ) {
-					$asset['thumbnail_url'] = $thumb;
-				}
-			}
+			unset( $asset['thumbweb'], $asset['thumb512'], $asset['THUMBWEB'], $asset['THUMB512'], $asset['thumbnail_url'] );
 		}
 		unset( $asset );
 
@@ -245,10 +248,60 @@ class Merlinone_REST {
 		$url = is_string( $url_result ) ? $url_result : ( isset( $url_result['url'] ) ? $url_result['url'] : '' );
 
 		if ( $url ) {
-			set_transient( $cache_key, $url, DAY_IN_SECONDS );
+			set_transient( $cache_key, $url, 30 * MINUTE_IN_SECONDS );
 		}
 
 		return rest_ensure_response( array( 'url' => $url ) );
+	}
+
+	public function serve_thumb( WP_REST_Request $request ) {
+		// Verify nonce from query param since <img> tags can't send REST headers.
+		$nonce = isset( $_GET['_wpnonce'] ) ? $_GET['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		if ( ! wp_verify_nonce( $nonce, 'wp_rest' ) || ! current_user_can( 'edit_posts' ) ) {
+			return new WP_Error( 'unauthorized', 'Unauthorized.', array( 'status' => 401 ) );
+		}
+
+		$cimageid  = $request['cimageid'];
+		$cache_key = 'merlin_thumbdata_' . $cimageid;
+		$data      = get_transient( $cache_key );
+
+		if ( ! $data ) {
+			$api  = new Merlinone_API();
+			$data = $api->download_asset( $cimageid, array(
+				'image.format' => 'jpg',
+				'image.pixels' => '200',
+			) );
+
+			if ( is_wp_error( $data ) || empty( $data ) ) {
+				return new WP_Error( 'thumb_failed', 'Could not fetch thumbnail.', array( 'status' => 502 ) );
+			}
+
+			// Cache the raw bytes for 24 hours.
+			set_transient( $cache_key, base64_encode( $data ), DAY_IN_SECONDS );
+		} else {
+			$data = base64_decode( $data );
+		}
+
+		header( 'Content-Type: image/jpeg' );
+		header( 'Cache-Control: public, max-age=86400' );
+		echo $data; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		exit;
+	}
+
+	public function preview( WP_REST_Request $request ) {
+		$cimageid = $request['cimageid'];
+		$api      = new Merlinone_API();
+
+		// Only fetch the preview image URL — metadata comes from JS.
+		$url_result = $api->get_temp_url( $cimageid, array( 'image.format' => 'jpg', 'image.pixels' => '800' ) );
+		$preview_url = '';
+		if ( ! is_wp_error( $url_result ) ) {
+			$preview_url = is_string( $url_result ) ? $url_result : ( isset( $url_result['url'] ) ? $url_result['url'] : '' );
+		}
+
+		return rest_ensure_response( array(
+			'preview_url' => $preview_url,
+		) );
 	}
 
 	public function update_meta( WP_REST_Request $request ) {
@@ -264,32 +317,27 @@ class Merlinone_REST {
 
 	public function thumbnails_batch( WP_REST_Request $request ) {
 		$ids = array_filter( array_map( 'trim', preg_split( '/[\s,]+/', $request['ids'] ) ), 'strlen' );
-		$ids = array_slice( $ids, 0, 20 );
+		$ids = array_slice( $ids, 0, 2 );
 
-		$api     = new Merlinone_API();
-		$thumbs  = array();
+		$api    = new Merlinone_API();
+		$thumbs = array();
 
-		// Resolve cached ones first, collect uncached.
-		$uncached = array();
 		foreach ( $ids as $id ) {
+			// Check URL cache first (short TTL — temp URLs expire).
 			$cache_key = 'merlin_thumb_' . $id;
 			$cached    = get_transient( $cache_key );
 			if ( $cached ) {
 				$thumbs[ $id ] = $cached;
-			} else {
-				$uncached[] = $id;
+				continue;
 			}
-		}
 
-		// Fetch uncached thumbnails sequentially (mXchange doesn't support batch,
-		// but this reuses the same authenticated session so each call is one HTTP hop).
-		foreach ( $uncached as $id ) {
+			// Get a temp URL (fast — no image download).
 			$result = $api->get_temp_url( $id, array( 'image.format' => 'jpg', 'image.pixels' => '200' ) );
 			if ( ! is_wp_error( $result ) ) {
 				$url = is_string( $result ) ? $result : ( isset( $result['url'] ) ? $result['url'] : '' );
 				if ( $url ) {
 					$thumbs[ $id ] = $url;
-					set_transient( 'merlin_thumb_' . $id, $url, DAY_IN_SECONDS );
+					set_transient( $cache_key, $url, 30 * MINUTE_IN_SECONDS );
 				}
 			}
 		}

@@ -66,14 +66,16 @@ class Merlinone_API {
 		$defaults = array(
 			'type'   => 'IMAGES',
 			'from'   => 0,
-			'size'   => 20,
+			'size'   => 10,
 			'fields' => array( 'cobject205', 'capt2120', 'cbyline280', 'credit2110', 'ckeywords', 'datecr255', 'cimageid', 'thumb512', 'thumbweb' ),
 		);
 		$opts = wp_parse_args( $options, $defaults );
 
-		// Step 1: Create the search.
+		// Step 1: Create the search, sorted by ingest date (newest first).
 		$search_body = array(
-			'search.term' => $term,
+			'search.term'       => $term,
+			'search.sort.field' => 'INDATE',
+			'search.sort.order' => 'DESCENDING',
 		);
 		if ( ! empty( $opts['type'] ) ) {
 			$search_body['search.asset.type'] = $opts['type'];
