@@ -129,7 +129,7 @@ class Merlinone_API {
 	public function download_asset( $cimageid, $transform = array() ) {
 		$defaults = array(
 			'image.format' => 'jpg',
-			'image.pixels' => '2400',
+			'image.pixels' => '1200',
 		);
 		$transform = wp_parse_args( $transform, $defaults );
 

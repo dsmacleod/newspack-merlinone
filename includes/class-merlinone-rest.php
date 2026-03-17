@@ -68,6 +68,18 @@ class Merlinone_REST {
 			),
 		) );
 
+		register_rest_route( $namespace, '/thumbnails', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'thumbnails_batch' ),
+			'permission_callback' => array( $this, 'check_permission' ),
+			'args'                => array(
+				'ids' => array(
+					'required' => true,
+					'type'     => 'string',
+				),
+			),
+		) );
+
 		register_rest_route( $namespace, '/lookup', array(
 			'methods'             => 'POST',
 			'callback'            => array( $this, 'lookup' ),
@@ -76,6 +88,22 @@ class Merlinone_REST {
 				'ids' => array(
 					'required' => true,
 					'type'     => 'string',
+					'sanitize_callback' => 'sanitize_text_field',
+				),
+			),
+		) );
+
+		register_rest_route( $namespace, '/update-meta', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'update_meta' ),
+			'permission_callback' => array( $this, 'check_permission' ),
+			'args'                => array(
+				'attachment_id' => array(
+					'required' => true,
+					'type'     => 'integer',
+				),
+				'credit' => array(
+					'type'              => 'string',
 					'sanitize_callback' => 'sanitize_text_field',
 				),
 			),
@@ -99,7 +127,10 @@ class Merlinone_REST {
 		$type_map = array( 'Image' => 'IMAGES', 'Graphic' => 'IMAGES', '' => '' );
 		$api_type = isset( $type_map[ $type ] ) ? $type_map[ $type ] : $type;
 
-		$result = $api->search( $request['query'], array(
+		// Escape special characters that mXchange/Lucene interprets as operators.
+		$safe_query = preg_replace( '/([.+\-!(){}[\]^"~*?:\\\\\/])/', '\\\\$1', $request['query'] );
+
+		$result = $api->search( $safe_query, array(
 			'type' => $api_type,
 			'from' => $request['from'],
 			'size' => $request['size'],
@@ -110,6 +141,22 @@ class Merlinone_REST {
 		}
 
 		$assets = isset( $result['assets'] ) ? $result['assets'] : array();
+
+		// Normalize inline thumbnail URLs from search results so the JS can use them directly.
+		foreach ( $assets as &$asset ) {
+			if ( empty( $asset['thumbnail_url'] ) ) {
+				$thumb = '';
+				if ( ! empty( $asset['thumbweb'] ) ) {
+					$thumb = $asset['thumbweb'];
+				} elseif ( ! empty( $asset['thumb512'] ) ) {
+					$thumb = $asset['thumb512'];
+				}
+				if ( $thumb ) {
+					$asset['thumbnail_url'] = $thumb;
+				}
+			}
+		}
+		unset( $asset );
 
 		return rest_ensure_response( array(
 			'assets' => $assets,
@@ -125,10 +172,22 @@ class Merlinone_REST {
 			return $attachment_id;
 		}
 
+		$attachment = get_post( $attachment_id );
+		$caption    = $attachment ? $attachment->post_excerpt : '';
+		$title      = $attachment ? $attachment->post_title : '';
+		$credit     = get_post_meta( $attachment_id, '_image_credit', true );
+		$byline     = get_post_meta( $attachment_id, '_merlinone_byline', true );
+		$cimageid_stored = get_post_meta( $attachment_id, '_merlinone_cimageid', true );
+
 		return rest_ensure_response( array(
 			'attachment_id' => $attachment_id,
 			'url'           => wp_get_attachment_url( $attachment_id ),
 			'edit_link'     => get_edit_post_link( $attachment_id, 'raw' ),
+			'caption'       => $caption,
+			'credit'        => $credit,
+			'byline'        => $byline,
+			'title'         => $title,
+			'cimageid'      => $cimageid_stored,
 		) );
 	}
 
@@ -190,6 +249,52 @@ class Merlinone_REST {
 		}
 
 		return rest_ensure_response( array( 'url' => $url ) );
+	}
+
+	public function update_meta( WP_REST_Request $request ) {
+		$id = (int) $request['attachment_id'];
+		if ( ! get_post( $id ) ) {
+			return new WP_Error( 'not_found', 'Attachment not found.', array( 'status' => 404 ) );
+		}
+		if ( isset( $request['credit'] ) ) {
+			update_post_meta( $id, '_image_credit', sanitize_text_field( $request['credit'] ) );
+		}
+		return rest_ensure_response( array( 'updated' => true ) );
+	}
+
+	public function thumbnails_batch( WP_REST_Request $request ) {
+		$ids = array_filter( array_map( 'trim', preg_split( '/[\s,]+/', $request['ids'] ) ), 'strlen' );
+		$ids = array_slice( $ids, 0, 20 );
+
+		$api     = new Merlinone_API();
+		$thumbs  = array();
+
+		// Resolve cached ones first, collect uncached.
+		$uncached = array();
+		foreach ( $ids as $id ) {
+			$cache_key = 'merlin_thumb_' . $id;
+			$cached    = get_transient( $cache_key );
+			if ( $cached ) {
+				$thumbs[ $id ] = $cached;
+			} else {
+				$uncached[] = $id;
+			}
+		}
+
+		// Fetch uncached thumbnails sequentially (mXchange doesn't support batch,
+		// but this reuses the same authenticated session so each call is one HTTP hop).
+		foreach ( $uncached as $id ) {
+			$result = $api->get_temp_url( $id, array( 'image.format' => 'jpg', 'image.pixels' => '200' ) );
+			if ( ! is_wp_error( $result ) ) {
+				$url = is_string( $result ) ? $result : ( isset( $result['url'] ) ? $result['url'] : '' );
+				if ( $url ) {
+					$thumbs[ $id ] = $url;
+					set_transient( 'merlin_thumb_' . $id, $url, DAY_IN_SECONDS );
+				}
+			}
+		}
+
+		return rest_ensure_response( array( 'thumbnails' => $thumbs ) );
 	}
 
 	public function status( WP_REST_Request $request ) {
