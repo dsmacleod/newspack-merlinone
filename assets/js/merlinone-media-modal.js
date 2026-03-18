@@ -2,7 +2,7 @@
 	const { registerPlugin } = wp.plugins;
 	const { PluginSidebar, PluginSidebarMoreMenuItem } = wp.editPost || wp.editor;
 	const { createElement: el, useState, useCallback, useEffect, useRef } = wp.element;
-	const { PanelBody, TextControl, Button, Spinner, SelectControl } = wp.components;
+	const { PanelBody, TextControl, Button, Spinner } = wp.components;
 	const { useDispatch, useSelect } = wp.data;
 	const apiFetch = wp.apiFetch;
 
@@ -10,30 +10,24 @@
 
 	function MerlinOnePanel() {
 		const [ query, setQuery ] = useState( '' );
-		const [ type, setType ] = useState( 'Image' );
 		const [ results, setResults ] = useState( [] );
 		const [ total, setTotal ] = useState( 0 );
+		const [ page, setPage ] = useState( 1 );
+		const [ pages, setPages ] = useState( 0 );
 		const [ loading, setLoading ] = useState( false );
-		const [ importing, setImporting ] = useState( null );
 		const [ error, setError ] = useState( '' );
-		const [ page, setPage ] = useState( 0 );
-		const [ thumbs, setThumbs ] = useState( {} );
 		const [ idInput, setIdInput ] = useState( '' );
-		// Edit step state: holds imported asset data before final insertion.
+		// Edit panel state.
 		const [ editData, setEditData ] = useState( null );
 		const [ editCaption, setEditCaption ] = useState( '' );
 		const [ editCredit, setEditCredit ] = useState( '' );
 		const [ editAsFeatured, setEditAsFeatured ] = useState( false );
-		// Detail/preview panel state.
-		const [ previewAsset, setPreviewAsset ] = useState( null );
-		const [ previewUrl, setPreviewUrl ] = useState( '' );
-		const [ previewLoading, setPreviewLoading ] = useState( false );
+		const [ importing, setImporting ] = useState( false );
 
 		const { getSelectedBlockClientId, getBlockIndex, getBlockRootClientId } = wp.data.select( 'core/block-editor' );
 		const { insertBlock } = useDispatch( 'core/block-editor' );
 		const { editPost } = useDispatch( 'core/editor' );
 
-		// Track last selected editor block so we still know where to insert after sidebar steals focus.
 		const lastSelectedBlock = useRef( null );
 		var currentSelected = useSelect( function( select ) {
 			return select( 'core/block-editor' ).getSelectedBlockClientId();
@@ -44,35 +38,36 @@
 			}
 		}, [ currentSelected ] );
 
-		const pageSize = 10;
+		const pageSize = 20;
 
-		const doSearch = useCallback( function( fromOffset ) {
+		// Search WP media library for MerlinOne photos.
+		const doSearch = useCallback( function( p ) {
 			if ( ! query.trim() ) return;
 			setLoading( true );
 			setError( '' );
-			var offset = typeof fromOffset === 'number' ? fromOffset : 0;
+			var pageNum = typeof p === 'number' ? p : 1;
 			apiFetch( {
 				path: NAMESPACE + '/search',
 				method: 'POST',
-				data: { query: query, type: type, from: offset, size: pageSize },
+				data: { query: query, page: pageNum, per_page: pageSize },
 			} ).then( function( res ) {
 				setResults( res.assets || [] );
 				setTotal( res.total || 0 );
-				setPage( Math.floor( offset / pageSize ) );
+				setPage( res.page || 1 );
+				setPages( res.pages || 0 );
 				setLoading( false );
-				
 			} ).catch( function( err ) {
 				setError( err.message || 'Search failed' );
 				setLoading( false );
 			} );
-		}, [ query, type ] );
+		}, [ query ] );
 
+		// Look up by Merlin IDs — imports on demand, returns WP data.
 		var doLookup = function() {
 			if ( ! idInput.trim() ) return;
 			setLoading( true );
 			setError( '' );
 			setResults( [] );
-			setThumbs( {} );
 			apiFetch( {
 				path: NAMESPACE + '/lookup',
 				method: 'POST',
@@ -81,109 +76,39 @@
 				var assets = res.assets || [];
 				setResults( assets );
 				setTotal( assets.length );
-				setPage( 0 );
+				setPage( 1 );
+				setPages( 1 );
 				setLoading( false );
-				
+				if ( res.errors && res.errors.length ) {
+					setError( res.errors.map( function( e ) { return e.id + ': ' + e.error; } ).join( '; ' ) );
+				}
 			} ).catch( function( err ) {
 				setError( err.message || 'Lookup failed' );
 				setLoading( false );
 			} );
 		};
 
-		// Load thumbnails individually in the background. Results show immediately
-		// with metadata; thumbnails fill in as each one resolves.
-		useEffect( function() {
-			var cancelled = false;
-			var ids = results.map( function( a ) { return a.CIMAGEID || a.cimageid || a.id; } ).filter( Boolean );
-			var queue = ids.filter( function( id ) { return ! thumbs[ id ]; } );
-			var active = 0;
-			var LIMIT = 3;
-
-			function next() {
-				if ( cancelled || queue.length === 0 ) return;
-				while ( active < LIMIT && queue.length > 0 ) {
-					( function( id ) {
-						active++;
-						apiFetch( {
-							path: NAMESPACE + '/thumbnail',
-							method: 'POST',
-							data: { cimageid: String( id ) },
-						} ).then( function( res ) {
-							active--;
-							if ( cancelled ) return;
-							if ( res.url ) {
-								setThumbs( function( prev ) {
-									var n = Object.assign( {}, prev );
-									n[ id ] = res.url;
-									return n;
-								} );
-							}
-							next();
-						} ).catch( function() { active--; next(); } );
-					} )( queue.shift() );
-				}
-			}
-			next();
-
-			return function() { cancelled = true; };
-		}, [ results ] );
-
-		var doPreview = function( asset ) {
-			var id = asset.CIMAGEID || asset.cimageid || asset.id;
-			setPreviewAsset( asset );
-			setPreviewUrl( '' );
-			setPreviewLoading( true );
-			// Only fetch the larger preview image — metadata is already in the asset.
-			apiFetch( {
-				path: NAMESPACE + '/preview',
-				method: 'POST',
-				data: { cimageid: String( id ) },
-			} ).then( function( res ) {
-				setPreviewLoading( false );
-				setPreviewUrl( res.preview_url || '' );
-			} ).catch( function() {
-				setPreviewLoading( false );
-			} );
+		// Click a result → go straight to edit panel.
+		var doSelect = function( asset, asFeatured ) {
+			setEditData( asset );
+			setEditCaption( asset.caption || '' );
+			setEditCredit( asset.credit || '' );
+			setEditAsFeatured( asFeatured || false );
 		};
 
-		var closePreview = function() {
-			setPreviewAsset( null );
-			setPreviewUrl( '' );
-		};
-
-		var doImport = function( cimageid, asFeatured ) {
-			setImporting( cimageid );
-			setEditAsFeatured( asFeatured );
-			setPreviewAsset( null );
-			setPreviewUrl( '' );
-			apiFetch( {
-				path: NAMESPACE + '/import',
-				method: 'POST',
-				data: { cimageid: cimageid },
-			} ).then( function( res ) {
-				setImporting( null );
-				setEditData( res );
-				setEditCaption( res.caption || '' );
-				setEditCredit( res.credit || '' );
-			} ).catch( function( err ) {
-				setImporting( null );
-				setError( err.message || 'Import failed' );
-			} );
-		};
-
+		// Confirm insert.
 		var doConfirmInsert = function() {
 			if ( ! editData ) return;
 			var selectedId = lastSelectedBlock.current || getSelectedBlockClientId();
 			var rootId = selectedId ? getBlockRootClientId( selectedId ) : '';
 			var insertIndex = selectedId ? getBlockIndex( selectedId ) + 1 : undefined;
 
-			// Build caption with credit.
 			var captionHtml = editCaption;
 			if ( editCredit ) {
 				captionHtml += ( captionHtml ? ' ' : '' ) + '(' + editCredit + ')';
 			}
 
-			// Save updated caption/credit back to the attachment only if changed.
+			// Persist caption/credit changes.
 			var captionChanged = editCaption !== ( editData.caption || '' );
 			var creditChanged = editCredit !== ( editData.credit || '' );
 			if ( captionChanged || creditChanged ) {
@@ -221,22 +146,12 @@
 
 		return el( 'div', { className: 'merlinone-panel' },
 			el( TextControl, {
-				label: 'Search MerlinOne',
+				label: 'Search MerlinOne Photos',
 				value: query,
 				onChange: setQuery,
-				onKeyDown: function( e ) { if ( e.key === 'Enter' ) doSearch( 0 ); },
+				onKeyDown: function( e ) { if ( e.key === 'Enter' ) doSearch( 1 ); },
 			} ),
-			el( SelectControl, {
-				label: 'Type',
-				value: type,
-				options: [
-					{ label: 'Images', value: 'Image' },
-					{ label: 'Graphics', value: 'Graphic' },
-					{ label: 'All', value: '' },
-				],
-				onChange: setType,
-			} ),
-			el( Button, { variant: 'primary', onClick: function() { doSearch( 0 ); }, disabled: loading || ! query.trim() }, 'Search' ),
+			el( Button, { variant: 'primary', onClick: function() { doSearch( 1 ); }, disabled: loading || ! query.trim() }, 'Search' ),
 
 			el( 'hr', { style: { margin: '12px 0' } } ),
 			el( 'label', { style: { display: 'block', marginBottom: '4px', fontWeight: '600', fontSize: '11px', textTransform: 'uppercase' } }, 'Merlin IDs' ),
@@ -252,7 +167,7 @@
 			error && el( 'p', { className: 'merlinone-error' }, error ),
 			loading && el( Spinner ),
 
-			// Edit/review panel — shown after import, before insertion.
+			// Edit panel — shown when a result is selected.
 			editData && el( 'div', { className: 'merlinone-edit-panel', style: { border: '1px solid #ddd', padding: '12px', marginTop: '12px', background: '#f9f9f9' } },
 				el( 'h3', { style: { marginTop: 0, fontSize: '13px', textTransform: 'uppercase' } },
 					editAsFeatured ? 'Review Featured Image' : 'Review Image'
@@ -261,15 +176,15 @@
 				el( 'table', { style: { width: '100%', fontSize: '12px', marginBottom: '12px', borderCollapse: 'collapse' } },
 					el( 'tbody', null,
 						el( 'tr', null,
-							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Merlin ID'),
+							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Merlin ID' ),
 							el( 'td', { style: { padding: '2px 0' } }, editData.cimageid || '—' )
 						),
 						el( 'tr', null,
-							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Title'),
+							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Title' ),
 							el( 'td', { style: { padding: '2px 0' } }, editData.title || '—' )
 						),
 						el( 'tr', null,
-							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Byline'),
+							el( 'td', { style: { padding: '2px 8px 2px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Byline' ),
 							el( 'td', { style: { padding: '2px 0' } }, editData.byline || '—' )
 						)
 					)
@@ -294,105 +209,46 @@
 				)
 			),
 
-			// Detail/preview panel — metadata shows instantly, image loads in background.
-			previewAsset && ! editData && ( function() {
-				var pId = String( previewAsset.CIMAGEID || previewAsset.cimageid || previewAsset.id );
-				var pTitle = ( previewAsset.COBJECT205 || previewAsset.cobject205 || '' ).trim();
-				var pCaption = ( previewAsset.CAPT2120 || previewAsset.capt2120 || '' ).trim();
-				var pCredit = ( previewAsset.CREDIT2110 || previewAsset.credit2110 || '' ).trim();
-				var pByline = ( previewAsset.CBYLINE280 || previewAsset.cbyline280 || '' ).trim();
-				var pDate = previewAsset.DATECR255 || previewAsset.datecr255 || '';
-				if ( pDate ) { pDate = pDate.substring( 0, 10 ); }
-				var pKeywords = ( previewAsset.CKEYWORDS || previewAsset.ckeywords || '' ).trim();
-
-				return el( 'div', { className: 'merlinone-preview-panel', style: { marginTop: '12px' } },
-					el( Button, { variant: 'tertiary', onClick: closePreview, style: { marginBottom: '8px' } }, '\u2190 Back to results' ),
-					el( 'div', { style: { width: '100%', minHeight: '120px', background: '#eee', marginBottom: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
-						previewUrl
-							? el( 'img', { src: previewUrl, style: { width: '100%', height: 'auto' } } )
-							: ( previewLoading ? el( Spinner ) : null )
-					),
-					el( 'table', { style: { width: '100%', fontSize: '12px', marginBottom: '12px', borderCollapse: 'collapse' } },
-						el( 'tbody', null,
-							el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Merlin ID' ),
-								el( 'td', { style: { padding: '3px 0' } }, pId )
-							),
-							pTitle && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Title' ),
-								el( 'td', { style: { padding: '3px 0' } }, pTitle )
-							),
-							pCaption && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Caption' ),
-								el( 'td', { style: { padding: '3px 0' } }, pCaption )
-							),
-							pCredit && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Credit' ),
-								el( 'td', { style: { padding: '3px 0' } }, pCredit )
-							),
-							pByline && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Byline' ),
-								el( 'td', { style: { padding: '3px 0' } }, pByline )
-							),
-							pDate && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Date' ),
-								el( 'td', { style: { padding: '3px 0' } }, pDate )
-							),
-							pKeywords && el( 'tr', null,
-								el( 'td', { style: { padding: '3px 8px 3px 0', fontWeight: '600', whiteSpace: 'nowrap', verticalAlign: 'top' } }, 'Keywords' ),
-								el( 'td', { style: { padding: '3px 0' } }, pKeywords )
-							)
-						)
-					),
-					el( 'div', { style: { display: 'flex', gap: '8px' } },
-						el( Button, {
-							variant: 'primary',
-							isBusy: importing === pId,
-							disabled: !!importing,
-							onClick: function() { doImport( pId, false ); },
-						}, 'Insert Image' ),
-						el( Button, {
-							variant: 'secondary',
-							isBusy: importing === pId,
-							disabled: !!importing,
-							onClick: function() { doImport( pId, true ); },
-						}, 'Featured' )
-					)
-				);
-			} )(),
-
-			// Results list — hidden when previewing or editing.
-			! editData && ! previewAsset && el( 'div', { className: 'merlinone-results' },
+			// Results list — instant thumbnails from WP.
+			! editData && el( 'div', { className: 'merlinone-results' },
 				results.map( function( asset ) {
-					var id = asset.CIMAGEID || asset.cimageid || asset.id;
-					var title = ( asset.cobject205 || asset.COBJECT205 || asset.title || '' ).trim();
-					var credit = asset.CREDIT2110 || asset.credit2110 || '';
-					var date = asset.DATECR255 || asset.datecr255 || '';
-					if ( date ) { date = date.substring( 0, 10 ); }
-					var thumb = thumbs[ id ] || '';
-					var isImporting = importing === id;
+					var thumb = asset.thumbnail_url || '';
+					var title = asset.title || '';
+					var credit = asset.credit || '';
+					var date = asset.date ? asset.date.substring( 0, 10 ) : '';
 
-					return el( 'div', { key: id, className: 'merlinone-result', onClick: function() { doPreview( asset ); }, style: { cursor: 'pointer' } },
+					return el( 'div', {
+						key: asset.attachment_id,
+						className: 'merlinone-result',
+						style: { cursor: 'pointer' },
+						onClick: function() { doSelect( asset, false ); },
+					},
 						el( 'div', { style: { display: 'flex', gap: '8px' } },
 							el( 'div', { style: { width: '80px', minWidth: '80px', height: '60px', background: '#eee', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' } },
 								thumb
 									? el( 'img', { src: thumb, alt: title, style: { width: '100%', height: '100%', objectFit: 'cover' } } )
-									: el( Spinner )
+									: el( 'span', { style: { fontSize: '10px', color: '#999' } }, 'No thumb' )
 							),
 							el( 'div', { style: { flex: 1, minWidth: 0 } },
-								el( 'p', { style: { margin: '0 0 2px', fontWeight: '600', fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, title || 'ID: ' + id ),
+								el( 'p', { style: { margin: '0 0 2px', fontWeight: '600', fontSize: '12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, title || 'ID: ' + asset.cimageid ),
 								credit && el( 'p', { style: { margin: 0, fontSize: '11px', color: '#666' } }, credit ),
 								date && el( 'p', { style: { margin: 0, fontSize: '11px', color: '#999' } }, date )
-							)
+							),
+							el( Button, {
+								variant: 'tertiary',
+								style: { alignSelf: 'center', fontSize: '11px' },
+								onClick: function( e ) { e.stopPropagation(); doSelect( asset, true ); },
+							}, 'Featured' )
 						)
 					);
 				} )
 			),
 
-			! editData && ! previewAsset && total > pageSize && el( 'div', { className: 'merlinone-pagination' },
-				page > 0 && el( Button, { variant: 'tertiary', onClick: function() { doSearch( ( page - 1 ) * pageSize ); } }, '← Prev' ),
-				el( 'span', null, 'Page ' + ( page + 1 ) + ' of ' + Math.ceil( total / pageSize ) ),
-				( page + 1 ) * pageSize < total && el( Button, { variant: 'tertiary', onClick: function() { doSearch( ( page + 1 ) * pageSize ); } }, 'Next →' )
+			// Pagination.
+			! editData && pages > 1 && el( 'div', { className: 'merlinone-pagination' },
+				page > 1 && el( Button, { variant: 'tertiary', onClick: function() { doSearch( page - 1 ); } }, '\u2190 Prev' ),
+				el( 'span', null, 'Page ' + page + ' of ' + pages ),
+				page < pages && el( Button, { variant: 'tertiary', onClick: function() { doSearch( page + 1 ); } }, 'Next \u2192' )
 			)
 		);
 	}

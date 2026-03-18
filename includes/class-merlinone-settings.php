@@ -33,6 +33,7 @@ class Merlinone_Settings {
 	}
 
 	public function register_settings() {
+		// Connection settings.
 		add_settings_section( 'merlinone_main', 'Connection Settings', '__return_null', 'newspack-merlinone' );
 
 		$fields = array(
@@ -58,6 +59,22 @@ class Merlinone_Settings {
 				}
 			}, 'newspack-merlinone', 'merlinone_main' );
 		}
+
+		// Background Sync settings.
+		add_settings_section( 'merlinone_sync', 'Background Sync', '__return_null', 'newspack-merlinone' );
+
+		register_setting( 'newspack_merlinone', Merlinone_Sync::OPTION_ENABLE );
+
+		add_settings_field(
+			Merlinone_Sync::OPTION_ENABLE,
+			'Enable Background Sync',
+			function() {
+				$enabled = get_option( Merlinone_Sync::OPTION_ENABLE, false );
+				echo '<label><input type="checkbox" name="' . esc_attr( Merlinone_Sync::OPTION_ENABLE ) . '" value="1" ' . checked( $enabled, true, false ) . ' /> Import new MerlinOne photos automatically every 15 minutes</label>';
+			},
+			'newspack-merlinone',
+			'merlinone_sync'
+		);
 	}
 
 	public function render_page() {
@@ -75,23 +92,83 @@ class Merlinone_Settings {
 			<h2>Connection Test</h2>
 			<button type="button" class="button" id="merlinone-test-connection">Test Connection</button>
 			<span id="merlinone-test-result"></span>
+
+			<hr>
+			<h2>Sync Status</h2>
+			<table class="form-table" id="merlinone-sync-status">
+				<tr><th>Total MerlinOne Photos in WP</th><td id="sync-total">—</td></tr>
+				<tr><th>Last Sync</th><td id="sync-last">—</td></tr>
+				<tr><th>Last Result</th><td id="sync-result">—</td></tr>
+				<tr><th>Next Scheduled</th><td id="sync-next">—</td></tr>
+			</table>
+			<button type="button" class="button button-primary" id="merlinone-sync-now">Sync Now</button>
+			<span id="merlinone-sync-feedback"></span>
+
 			<script>
-			document.getElementById('merlinone-test-connection').addEventListener('click', function() {
-				var result = document.getElementById('merlinone-test-result');
-				result.textContent = 'Testing...';
-				fetch(wpApiSettings.root + 'newspack-merlinone/v1/status', {
-					headers: { 'X-WP-Nonce': wpApiSettings.nonce }
-				})
-				.then(function(r) { return r.json(); })
-				.then(function(data) {
-					result.textContent = data.connected ? '✓ Connected' : '✗ ' + (data.error || 'Failed') + (data.url ? ' (URL: ' + data.url + ')' : '') + (data.code ? ' [' + data.code + ']' : '') + (data.step ? ' (step: ' + data.step + ')' : '');
-					result.style.color = data.connected ? 'green' : 'red';
-				})
-				.catch(function() {
-					result.textContent = '✗ Request failed';
-					result.style.color = 'red';
+			(function() {
+				var root = wpApiSettings.root;
+				var nonce = wpApiSettings.nonce;
+				var headers = { 'X-WP-Nonce': nonce };
+
+				// Connection test.
+				document.getElementById('merlinone-test-connection').addEventListener('click', function() {
+					var result = document.getElementById('merlinone-test-result');
+					result.textContent = 'Testing...';
+					fetch(root + 'newspack-merlinone/v1/status', { headers: headers })
+					.then(function(r) { return r.json(); })
+					.then(function(data) {
+						result.textContent = data.connected ? '✓ Connected' : '✗ ' + (data.error || 'Failed');
+						result.style.color = data.connected ? 'green' : 'red';
+					})
+					.catch(function() {
+						result.textContent = '✗ Request failed';
+						result.style.color = 'red';
+					});
 				});
-			});
+
+				// Load sync status.
+				function loadSyncStatus() {
+					fetch(root + 'newspack-merlinone/v1/sync-status', { headers: headers })
+					.then(function(r) { return r.json(); })
+					.then(function(data) {
+						document.getElementById('sync-total').textContent = data.total_photos;
+						document.getElementById('sync-last').textContent = data.last_sync || 'Never';
+						var lr = data.last_result || {};
+						document.getElementById('sync-result').textContent = lr.status
+							? lr.status + ' (imported: ' + (lr.imported || 0) + ', errors: ' + (lr.errors || 0) + ')'
+							: '—';
+						document.getElementById('sync-next').textContent = data.next_scheduled
+							? new Date(data.next_scheduled * 1000).toLocaleString()
+							: 'Not scheduled';
+					});
+				}
+				loadSyncStatus();
+
+				// Sync now button.
+				document.getElementById('merlinone-sync-now').addEventListener('click', function() {
+					var fb = document.getElementById('merlinone-sync-feedback');
+					var btn = this;
+					btn.disabled = true;
+					fb.textContent = 'Syncing…';
+					fb.style.color = '';
+					fetch(root + 'newspack-merlinone/v1/sync', {
+						method: 'POST',
+						headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+					})
+					.then(function(r) { return r.json(); })
+					.then(function(data) {
+						btn.disabled = false;
+						fb.textContent = 'Done — imported ' + (data.imported || 0) + ' photos' + (data.errors ? ', ' + data.errors + ' errors' : '');
+						fb.style.color = data.status === 'ok' ? 'green' : 'orange';
+						loadSyncStatus();
+					})
+					.catch(function(err) {
+						btn.disabled = false;
+						fb.textContent = 'Sync failed: ' + (err.message || err);
+						fb.style.color = 'red';
+					});
+				});
+			})();
 			</script>
 		</div>
 		<?php

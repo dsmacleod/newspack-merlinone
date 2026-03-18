@@ -26,16 +26,11 @@ class Merlinone_REST {
 					'type'              => 'string',
 					'sanitize_callback' => 'sanitize_text_field',
 				),
-				'type'  => array(
-					'type'              => 'string',
-					'default'           => 'Image',
-					'sanitize_callback' => 'sanitize_text_field',
-				),
-				'from'  => array(
+				'page'  => array(
 					'type'    => 'integer',
-					'default' => 0,
+					'default' => 1,
 				),
-				'size'  => array(
+				'per_page' => array(
 					'type'    => 'integer',
 					'default' => 20,
 				),
@@ -55,52 +50,14 @@ class Merlinone_REST {
 			),
 		) );
 
-		register_rest_route( $namespace, '/thumbnail', array(
-			'methods'             => 'POST',
-			'callback'            => array( $this, 'thumbnail' ),
-			'permission_callback' => array( $this, 'check_permission' ),
-			'args'                => array(
-				'cimageid' => array(
-					'required'          => true,
-					'type'              => 'string',
-					'sanitize_callback' => 'sanitize_text_field',
-				),
-			),
-		) );
-
-		register_rest_route( $namespace, '/preview', array(
-			'methods'             => 'POST',
-			'callback'            => array( $this, 'preview' ),
-			'permission_callback' => array( $this, 'check_permission' ),
-			'args'                => array(
-				'cimageid' => array(
-					'required'          => true,
-					'type'              => 'string',
-					'sanitize_callback' => 'sanitize_text_field',
-				),
-			),
-		) );
-
-		register_rest_route( $namespace, '/thumbnails', array(
-			'methods'             => 'POST',
-			'callback'            => array( $this, 'thumbnails_batch' ),
-			'permission_callback' => array( $this, 'check_permission' ),
-			'args'                => array(
-				'ids' => array(
-					'required' => true,
-					'type'     => 'string',
-				),
-			),
-		) );
-
 		register_rest_route( $namespace, '/lookup', array(
 			'methods'             => 'POST',
 			'callback'            => array( $this, 'lookup' ),
 			'permission_callback' => array( $this, 'check_permission' ),
 			'args'                => array(
 				'ids' => array(
-					'required' => true,
-					'type'     => 'string',
+					'required'          => true,
+					'type'              => 'string',
 					'sanitize_callback' => 'sanitize_text_field',
 				),
 			),
@@ -127,46 +84,64 @@ class Merlinone_REST {
 			'callback'            => array( $this, 'status' ),
 			'permission_callback' => array( $this, 'check_permission' ),
 		) );
+
+		register_rest_route( $namespace, '/sync', array(
+			'methods'             => 'POST',
+			'callback'            => array( $this, 'sync' ),
+			'permission_callback' => array( $this, 'check_admin_permission' ),
+		) );
+
+		register_rest_route( $namespace, '/sync-status', array(
+			'methods'             => 'GET',
+			'callback'            => array( $this, 'sync_status' ),
+			'permission_callback' => array( $this, 'check_admin_permission' ),
+		) );
 	}
 
 	public function check_permission() {
 		return current_user_can( 'edit_posts' );
 	}
 
+	public function check_admin_permission() {
+		return current_user_can( 'manage_options' );
+	}
+
+	/**
+	 * Search WP media library for MerlinOne-imported attachments.
+	 */
 	public function search( WP_REST_Request $request ) {
-		$api  = new Merlinone_API();
-		$type = $request['type'];
-		// Map friendly names to API values.
-		$type_map = array( 'Image' => 'IMAGES', 'Graphic' => 'IMAGES', '' => '' );
-		$api_type = isset( $type_map[ $type ] ) ? $type_map[ $type ] : $type;
+		$query    = $request['query'];
+		$page     = max( 1, (int) $request['page'] );
+		$per_page = min( 50, max( 1, (int) $request['per_page'] ) );
 
-		// Escape special characters that mXchange/Lucene interprets as operators.
-		$safe_query = preg_replace( '/([.+\-!(){}[\]^"~*?:\\\\\/])/', '\\\\$1', $request['query'] );
+		$args = array(
+			'post_type'      => 'attachment',
+			'post_status'    => 'inherit',
+			'posts_per_page' => $per_page,
+			'paged'          => $page,
+			's'              => $query,
+			'meta_key'       => '_merlinone_cimageid',
+			'meta_compare'   => 'EXISTS',
+		);
 
-		$result = $api->search( $safe_query, array(
-			'type' => $api_type,
-			'from' => $request['from'],
-			'size' => $request['size'],
-		) );
+		$wp_query = new WP_Query( $args );
+		$assets   = array();
 
-		if ( is_wp_error( $result ) ) {
-			return $result;
+		foreach ( $wp_query->posts as $post ) {
+			$assets[] = $this->format_attachment( $post );
 		}
-
-		$assets = isset( $result['assets'] ) ? $result['assets'] : array();
-
-		// Strip inline thumbnail fields — they are Windows file paths, not URLs.
-		foreach ( $assets as &$asset ) {
-			unset( $asset['thumbweb'], $asset['thumb512'], $asset['THUMBWEB'], $asset['THUMB512'], $asset['thumbnail_url'] );
-		}
-		unset( $asset );
 
 		return rest_ensure_response( array(
 			'assets' => $assets,
-			'total'  => isset( $result['total'] ) ? (int) $result['total'] : count( $assets ),
+			'total'  => (int) $wp_query->found_posts,
+			'page'   => $page,
+			'pages'  => (int) $wp_query->max_num_pages,
 		) );
 	}
 
+	/**
+	 * Import a MerlinOne asset by ID (on-demand import for ID lookup).
+	 */
 	public function import_asset( WP_REST_Request $request ) {
 		$sideloader    = new Merlinone_Sideloader();
 		$attachment_id = $sideloader->import( $request['cimageid'] );
@@ -175,30 +150,15 @@ class Merlinone_REST {
 			return $attachment_id;
 		}
 
-		$attachment = get_post( $attachment_id );
-		$caption    = $attachment ? $attachment->post_excerpt : '';
-		$title      = $attachment ? $attachment->post_title : '';
-		$credit     = get_post_meta( $attachment_id, '_image_credit', true );
-		$byline     = get_post_meta( $attachment_id, '_merlinone_byline', true );
-		$cimageid_stored = get_post_meta( $attachment_id, '_merlinone_cimageid', true );
-
-		return rest_ensure_response( array(
-			'attachment_id' => $attachment_id,
-			'url'           => wp_get_attachment_url( $attachment_id ),
-			'edit_link'     => get_edit_post_link( $attachment_id, 'raw' ),
-			'caption'       => $caption,
-			'credit'        => $credit,
-			'byline'        => $byline,
-			'title'         => $title,
-			'cimageid'      => $cimageid_stored,
-		) );
+		$post = get_post( $attachment_id );
+		return rest_ensure_response( $this->format_attachment( $post ) );
 	}
 
+	/**
+	 * Look up Merlin IDs — import each on demand, return WP attachment data.
+	 */
 	public function lookup( WP_REST_Request $request ) {
-		$api = new Merlinone_API();
-		// Parse IDs: split on commas/spaces/newlines, or split a long digit string into 8-digit chunks.
 		$input = trim( $request['ids'] );
-		// If it's all digits with no separators, chunk into 8-digit IDs.
 		if ( preg_match( '/^\d{16,}$/', $input ) ) {
 			$raw_ids = str_split( $input, 8 );
 		} else {
@@ -210,97 +170,24 @@ class Merlinone_REST {
 			return new WP_Error( 'no_ids', 'No valid IDs provided.', array( 'status' => 400 ) );
 		}
 
-		// Cap at 20 to avoid timeouts.
-		$ids    = array_slice( $ids, 0, 20 );
-		$assets = array();
+		$ids        = array_slice( $ids, 0, 20 );
+		$sideloader = new Merlinone_Sideloader();
+		$assets     = array();
+		$errors     = array();
 
 		foreach ( $ids as $cimageid ) {
-			$assets[] = array(
-				'CIMAGEID'      => $cimageid,
-				'COBJECT205'    => 'ID: ' . $cimageid,
-				'thumbnail_url' => '',
-			);
+			$attachment_id = $sideloader->import( $cimageid );
+			if ( is_wp_error( $attachment_id ) ) {
+				$errors[] = array( 'id' => $cimageid, 'error' => $attachment_id->get_error_message() );
+			} else {
+				$assets[] = $this->format_attachment( get_post( $attachment_id ) );
+			}
 		}
 
 		return rest_ensure_response( array(
 			'assets' => $assets,
+			'errors' => $errors,
 			'total'  => count( $assets ),
-		) );
-	}
-
-	public function thumbnail( WP_REST_Request $request ) {
-		$cimageid = $request['cimageid'];
-
-		// Check cache first (24-hour TTL).
-		$cache_key = 'merlin_thumb_' . $cimageid;
-		$cached    = get_transient( $cache_key );
-		if ( $cached ) {
-			return rest_ensure_response( array( 'url' => $cached ) );
-		}
-
-		$api        = new Merlinone_API();
-		$url_result = $api->get_temp_url( $cimageid, array( 'image.format' => 'jpg', 'image.pixels' => '200' ) );
-
-		if ( is_wp_error( $url_result ) ) {
-			return $url_result;
-		}
-
-		$url = is_string( $url_result ) ? $url_result : ( isset( $url_result['url'] ) ? $url_result['url'] : '' );
-
-		if ( $url ) {
-			set_transient( $cache_key, $url, 30 * MINUTE_IN_SECONDS );
-		}
-
-		return rest_ensure_response( array( 'url' => $url ) );
-	}
-
-	public function serve_thumb( WP_REST_Request $request ) {
-		// Verify nonce from query param since <img> tags can't send REST headers.
-		$nonce = isset( $_GET['_wpnonce'] ) ? $_GET['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification
-		if ( ! wp_verify_nonce( $nonce, 'wp_rest' ) || ! current_user_can( 'edit_posts' ) ) {
-			return new WP_Error( 'unauthorized', 'Unauthorized.', array( 'status' => 401 ) );
-		}
-
-		$cimageid  = $request['cimageid'];
-		$cache_key = 'merlin_thumbdata_' . $cimageid;
-		$data      = get_transient( $cache_key );
-
-		if ( ! $data ) {
-			$api  = new Merlinone_API();
-			$data = $api->download_asset( $cimageid, array(
-				'image.format' => 'jpg',
-				'image.pixels' => '200',
-			) );
-
-			if ( is_wp_error( $data ) || empty( $data ) ) {
-				return new WP_Error( 'thumb_failed', 'Could not fetch thumbnail.', array( 'status' => 502 ) );
-			}
-
-			// Cache the raw bytes for 24 hours.
-			set_transient( $cache_key, base64_encode( $data ), DAY_IN_SECONDS );
-		} else {
-			$data = base64_decode( $data );
-		}
-
-		header( 'Content-Type: image/jpeg' );
-		header( 'Cache-Control: public, max-age=86400' );
-		echo $data; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
-		exit;
-	}
-
-	public function preview( WP_REST_Request $request ) {
-		$cimageid = $request['cimageid'];
-		$api      = new Merlinone_API();
-
-		// Only fetch the preview image URL — metadata comes from JS.
-		$url_result = $api->get_temp_url( $cimageid, array( 'image.format' => 'jpg', 'image.pixels' => '800' ) );
-		$preview_url = '';
-		if ( ! is_wp_error( $url_result ) ) {
-			$preview_url = is_string( $url_result ) ? $url_result : ( isset( $url_result['url'] ) ? $url_result['url'] : '' );
-		}
-
-		return rest_ensure_response( array(
-			'preview_url' => $preview_url,
 		) );
 	}
 
@@ -315,40 +202,10 @@ class Merlinone_REST {
 		return rest_ensure_response( array( 'updated' => true ) );
 	}
 
-	public function thumbnails_batch( WP_REST_Request $request ) {
-		$ids = array_filter( array_map( 'trim', preg_split( '/[\s,]+/', $request['ids'] ) ), 'strlen' );
-		$ids = array_slice( $ids, 0, 2 );
-
-		$api    = new Merlinone_API();
-		$thumbs = array();
-
-		foreach ( $ids as $id ) {
-			// Check URL cache first (short TTL — temp URLs expire).
-			$cache_key = 'merlin_thumb_' . $id;
-			$cached    = get_transient( $cache_key );
-			if ( $cached ) {
-				$thumbs[ $id ] = $cached;
-				continue;
-			}
-
-			// Get a temp URL (fast — no image download).
-			$result = $api->get_temp_url( $id, array( 'image.format' => 'jpg', 'image.pixels' => '200' ) );
-			if ( ! is_wp_error( $result ) ) {
-				$url = is_string( $result ) ? $result : ( isset( $result['url'] ) ? $result['url'] : '' );
-				if ( $url ) {
-					$thumbs[ $id ] = $url;
-					set_transient( $cache_key, $url, 30 * MINUTE_IN_SECONDS );
-				}
-			}
-		}
-
-		return rest_ensure_response( array( 'thumbnails' => $thumbs ) );
-	}
-
 	public function status( WP_REST_Request $request ) {
 		$step = 'init';
 		try {
-			$url = newspack_merlinone_get_config( 'url' );
+			$url  = newspack_merlinone_get_config( 'url' );
 			$step = 'config_loaded';
 
 			if ( empty( $url ) ) {
@@ -359,10 +216,8 @@ class Merlinone_REST {
 				) );
 			}
 
-			$step = 'creating_api';
-			$api  = new Merlinone_API();
-
 			$step  = 'logging_in';
+			$api   = new Merlinone_API();
 			$login = $api->login();
 
 			if ( is_wp_error( $login ) ) {
@@ -389,6 +244,66 @@ class Merlinone_REST {
 				'step'      => $step,
 			) );
 		}
+	}
+
+	/**
+	 * Trigger a manual sync.
+	 */
+	public function sync( WP_REST_Request $request ) {
+		$sync   = new Merlinone_Sync();
+		$result = $sync->sync_now();
+		return rest_ensure_response( $result );
+	}
+
+	/**
+	 * Get sync status info.
+	 */
+	public function sync_status( WP_REST_Request $request ) {
+		$last_sync   = get_option( Merlinone_Sync::OPTION_LAST, '' );
+		$last_result = get_option( Merlinone_Sync::OPTION_RESULT, array() );
+		$enabled     = (bool) get_option( Merlinone_Sync::OPTION_ENABLE, false );
+
+		// Count total MerlinOne photos in WP.
+		$count_query = new WP_Query( array(
+			'post_type'      => 'attachment',
+			'post_status'    => 'inherit',
+			'meta_key'       => '_merlinone_cimageid',
+			'meta_compare'   => 'EXISTS',
+			'posts_per_page' => 1,
+			'fields'         => 'ids',
+		) );
+
+		return rest_ensure_response( array(
+			'enabled'     => $enabled,
+			'last_sync'   => $last_sync,
+			'last_result' => $last_result,
+			'total_photos' => (int) $count_query->found_posts,
+			'next_scheduled' => wp_next_scheduled( Merlinone_Sync::CRON_HOOK ) ?: null,
+		) );
+	}
+
+	/**
+	 * Format a WP attachment post into the standard response shape.
+	 */
+	private function format_attachment( $post ) {
+		$id            = $post->ID;
+		$thumbnail_url = '';
+		$sizes         = wp_get_attachment_image_src( $id, 'thumbnail' );
+		if ( $sizes ) {
+			$thumbnail_url = $sizes[0];
+		}
+
+		return array(
+			'attachment_id' => $id,
+			'title'         => $post->post_title,
+			'caption'       => $post->post_excerpt,
+			'credit'        => get_post_meta( $id, '_image_credit', true ),
+			'byline'        => get_post_meta( $id, '_merlinone_byline', true ),
+			'date'          => $post->post_date,
+			'cimageid'      => get_post_meta( $id, '_merlinone_cimageid', true ),
+			'thumbnail_url' => $thumbnail_url,
+			'url'           => wp_get_attachment_url( $id ),
+		);
 	}
 }
 

@@ -80,7 +80,7 @@ class Merlinone_Sideloader {
 	/**
 	 * Check if asset was already imported.
 	 */
-	private function find_existing( $cimageid ) {
+	public function find_existing( $cimageid ) {
 		$query = new WP_Query( array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'any',
