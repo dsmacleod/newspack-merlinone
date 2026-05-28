@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Newspack MerlinOne DAM Integration
- * Description: Pull images from MerlinOne DAM into the WordPress media library via mXchange REST API.
- * Version: 2.0.0
+ * Description: Pull images from MerlinOne DAM into the WordPress media library via mXchange REST API. Auto-attaches photos when MERLIN ID: comments arrive via the bdn-metadata Doc_Receiver.
+ * Version: 2.1.0
  * Author: Dan MacLeod with Claude Code
  * Text Domain: newspack-merlinone
  * Requires at least: 6.0
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'NEWSPACK_MERLINONE_VERSION', '2.0.0' );
+define( 'NEWSPACK_MERLINONE_VERSION', '2.1.0' );
 define( 'NEWSPACK_MERLINONE_DIR', plugin_dir_path( __FILE__ ) );
 define( 'NEWSPACK_MERLINONE_URL', plugin_dir_url( __FILE__ ) );
 
@@ -22,6 +22,10 @@ require_once NEWSPACK_MERLINONE_DIR . 'includes/class-merlinone-sideloader.php';
 require_once NEWSPACK_MERLINONE_DIR . 'includes/class-merlinone-sync.php';
 require_once NEWSPACK_MERLINONE_DIR . 'includes/class-merlinone-settings.php';
 require_once NEWSPACK_MERLINONE_DIR . 'includes/class-merlinone-rest.php';
+require_once NEWSPACK_MERLINONE_DIR . 'includes/class-merlinone-auto-attach.php';
+
+// Auto-attach Merlin photos from Docs comments (hooks bdn_doc_imported at priority 20).
+( new Merlinone_Auto_Attach() )->register();
 
 /**
  * Get a plugin configuration value, checking wp-config constants first, then options.
